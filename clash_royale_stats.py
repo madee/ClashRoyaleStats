@@ -11,7 +11,8 @@ import urllib.parse
 import urllib.error
 import json
 import os
-from typing import Optional, Dict, Any
+from datetime import datetime
+from typing import Optional, Dict, Any, List
 
 
 class ClashRoyaleAPI:
@@ -57,6 +58,11 @@ class ClashRoyaleAPI:
         encoded_tag = urllib.parse.quote(clan_tag, safe='')
         return self._make_request(f"/clans/{encoded_tag}/members")
 
+    def get_clan_river_race(self, clan_tag: str) -> Dict[str, Any]:
+        """Get current river race (clan war) info."""
+        encoded_tag = urllib.parse.quote(clan_tag, safe='')
+        return self._make_request(f"/clans/{encoded_tag}/currentriverrace")
+
     def get_player(self, player_tag: str) -> Dict[str, Any]:
         """Get player information by tag."""
         encoded_tag = urllib.parse.quote(player_tag, safe='')
@@ -81,15 +87,17 @@ class ClashRoyaleApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Clash Royale Statistics")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+        self.root.geometry("1000x700")
+        self.root.minsize(900, 600)
 
         # Configure style
         self.style = ttk.Style()
         self.style.theme_use('aqua' if os.name == 'darwin' else 'clam')
 
         self.api: Optional[ClashRoyaleAPI] = None
-        self.api_key = self._load_api_key()
+        config = self._load_config()
+        self.api_key = config.get('api_key')
+        self.last_clan_tag = config.get('last_clan_tag', '')
 
         self._setup_ui()
 
@@ -97,24 +105,28 @@ class ClashRoyaleApp:
             self.api = ClashRoyaleAPI(self.api_key)
             self.api_key_entry.insert(0, self.api_key)
 
-    def _load_api_key(self) -> Optional[str]:
-        """Load API key from config file."""
+        if self.last_clan_tag:
+            self.clan_tag_entry.insert(0, self.last_clan_tag)
+
+    def _load_config(self) -> Dict[str, Any]:
+        """Load config from file."""
         try:
             if os.path.exists(self.CONFIG_FILE):
                 with open(self.CONFIG_FILE, 'r') as f:
-                    config = json.load(f)
-                    return config.get('api_key')
+                    return json.load(f)
         except Exception:
             pass
-        return None
+        return {}
 
-    def _save_api_key(self, api_key: str):
-        """Save API key to config file."""
+    def _save_config(self, **kwargs):
+        """Save config values to file."""
         try:
+            config = self._load_config()
+            config.update(kwargs)
             with open(self.CONFIG_FILE, 'w') as f:
-                json.dump({'api_key': api_key}, f)
+                json.dump(config, f)
         except Exception as e:
-            messagebox.showwarning("Warning", f"Could not save API key: {e}")
+            messagebox.showwarning("Warning", f"Could not save config: {e}")
 
     def _setup_ui(self):
         """Set up the user interface."""
@@ -161,28 +173,37 @@ class ClashRoyaleApp:
         self.notebook = ttk.Notebook(main_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        # Clan tab
+        # Clan Statistics tab (first)
         self.clan_frame = ttk.Frame(self.notebook, padding="10")
         self.notebook.add(self.clan_frame, text="Clan Statistics")
 
         self.clan_text = scrolledtext.ScrolledText(self.clan_frame, wrap=tk.WORD, font=('Menlo', 11))
         self.clan_text.pack(fill=tk.BOTH, expand=True)
 
-        # Player tab
+        # Clan Members tab (second)
+        self.members_frame = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.members_frame, text="Clan Members")
+
+        self.members_text = tk.Text(self.members_frame, wrap=tk.WORD, font=('Menlo', 11))
+        members_scrollbar = ttk.Scrollbar(self.members_frame, orient=tk.VERTICAL, command=self.members_text.yview)
+        self.members_text.configure(yscrollcommand=members_scrollbar.set)
+        members_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.members_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Configure tag for clickable names
+        self.members_text.tag_configure("clickable", foreground="blue", underline=True)
+        self.members_text.tag_bind("clickable", "<Button-1>", self._on_member_click)
+        self.members_text.tag_bind("clickable", "<Enter>", lambda e: self.members_text.config(cursor="hand2"))
+        self.members_text.tag_bind("clickable", "<Leave>", lambda e: self.members_text.config(cursor=""))
+
+        # Player Statistics tab (third)
         self.player_frame = ttk.Frame(self.notebook, padding="10")
         self.notebook.add(self.player_frame, text="Player Statistics")
 
         self.player_text = scrolledtext.ScrolledText(self.player_frame, wrap=tk.WORD, font=('Menlo', 11))
         self.player_text.pack(fill=tk.BOTH, expand=True)
 
-        # Clan Members tab
-        self.members_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.members_frame, text="Clan Members")
-
-        self.members_text = scrolledtext.ScrolledText(self.members_frame, wrap=tk.WORD, font=('Menlo', 11))
-        self.members_text.pack(fill=tk.BOTH, expand=True)
-
-        # Battle Log tab
+        # Battle Log tab (fourth/last)
         self.battles_frame = ttk.Frame(self.notebook, padding="10")
         self.notebook.add(self.battles_frame, text="Battle Log")
 
@@ -211,7 +232,7 @@ class ClashRoyaleApp:
 
         self.api_key = api_key
         self.api = ClashRoyaleAPI(api_key)
-        self._save_api_key(api_key)
+        self._save_config(api_key=api_key)
         self.status_var.set("API key saved successfully")
         messagebox.showinfo("Success", "API key saved!")
 
@@ -221,6 +242,37 @@ class ClashRoyaleApp:
         if not tag.startswith('#'):
             tag = '#' + tag
         return tag
+
+    def _parse_last_seen(self, last_seen: str) -> str:
+        """Parse lastSeen timestamp to human readable format."""
+        if not last_seen:
+            return "Unknown"
+        try:
+            # Format: 20210101T120000.000Z
+            dt = datetime.strptime(last_seen[:15], "%Y%m%dT%H%M%S")
+            now = datetime.utcnow()
+            diff = now - dt
+
+            if diff.days > 0:
+                if diff.days == 1:
+                    return "1 day ago"
+                elif diff.days < 7:
+                    return f"{diff.days} days ago"
+                elif diff.days < 30:
+                    weeks = diff.days // 7
+                    return f"{weeks} week{'s' if weeks > 1 else ''} ago"
+                else:
+                    months = diff.days // 30
+                    return f"{months} month{'s' if months > 1 else ''} ago"
+            else:
+                hours = diff.seconds // 3600
+                if hours > 0:
+                    return f"{hours} hour{'s' if hours > 1 else ''} ago"
+                else:
+                    mins = diff.seconds // 60
+                    return f"{mins} min{'s' if mins > 1 else ''} ago"
+        except Exception:
+            return "Unknown"
 
     def _fetch_clan(self):
         """Fetch and display clan statistics."""
@@ -237,6 +289,9 @@ class ClashRoyaleApp:
         self.status_var.set(f"Fetching clan {tag}...")
         self.root.update()
 
+        # Save the clan tag for next session
+        self._save_config(last_clan_tag=tag)
+
         try:
             # Get clan info
             clan = self.api.get_clan(tag)
@@ -244,7 +299,19 @@ class ClashRoyaleApp:
 
             # Get members
             members = self.api.get_clan_members(tag)
-            self._display_members(members)
+
+            # Get river race (war) info for contribution points
+            war_participants = {}
+            try:
+                river_race = self.api.get_clan_river_race(tag)
+                clan_data = river_race.get('clan', {})
+                participants = clan_data.get('participants', [])
+                for p in participants:
+                    war_participants[p.get('tag')] = p.get('fame', 0)
+            except Exception:
+                pass  # War data not available
+
+            self._display_members(members, war_participants)
 
             self.notebook.select(self.clan_frame)
             self.status_var.set(f"Loaded clan: {clan.get('name', 'Unknown')}")
@@ -288,6 +355,57 @@ class ClashRoyaleApp:
             self.status_var.set("Error fetching player")
             messagebox.showerror("Error", str(e))
 
+    def _on_member_click(self, event):
+        """Handle click on member name to show their battle log."""
+        # Get the tag from the clicked position
+        index = self.members_text.index(f"@{event.x},{event.y}")
+
+        # Get all tags at this position
+        tags = self.members_text.tag_names(index)
+
+        # Find the member tag (starts with 'member_')
+        member_tag = None
+        for tag in tags:
+            if tag.startswith("member_"):
+                member_tag = tag[7:]  # Remove 'member_' prefix
+                break
+
+        if member_tag:
+            self._fetch_member_stats(member_tag)
+
+    def _fetch_member_stats(self, player_tag: str):
+        """Fetch and display stats and battle log for a clan member."""
+        if not self.api:
+            return
+
+        self.status_var.set(f"Fetching stats for {player_tag}...")
+        self.root.update()
+
+        try:
+            # Get player info
+            player = self.api.get_player(player_tag)
+            player_name = player.get('name', 'Unknown')
+
+            # Display player stats
+            self._display_player(player)
+
+            # Get and display battles
+            try:
+                battles = self.api.get_player_battles(player_tag)
+                self._display_battles_in_widget(battles, self.battles_text, player_name)
+            except Exception:
+                self.battles_text.delete(1.0, tk.END)
+                self.battles_text.insert(tk.END, "Battle log not available")
+
+            # Switch to Player Statistics tab
+            self.notebook.select(self.player_frame)
+
+            self.status_var.set(f"Loaded stats for {player_name}")
+
+        except Exception as e:
+            self.status_var.set("Error fetching member stats")
+            messagebox.showerror("Error", str(e))
+
     def _display_clan(self, clan: Dict[str, Any]):
         """Display clan statistics."""
         self.clan_text.delete(1.0, tk.END)
@@ -324,20 +442,25 @@ class ClashRoyaleApp:
 
         self.clan_text.insert(tk.END, "\n".join(lines))
 
-    def _display_members(self, members_data: Dict[str, Any]):
-        """Display clan members."""
+    def _display_members(self, members_data: Dict[str, Any], war_participants: Dict[str, int]):
+        """Display clan members with clickable names."""
         self.members_text.delete(1.0, tk.END)
+        self.members_text.config(state=tk.NORMAL)
 
         members = members_data.get('items', [])
 
-        lines = [
-            "=" * 80,
+        # Header
+        header = [
+            "=" * 100,
             f"  CLAN MEMBERS ({len(members)} total)",
-            "=" * 80,
+            "  Click on a player name to view their battle log",
+            "=" * 100,
             "",
-            f"{'#':<4} {'Name':<20} {'Role':<12} {'Trophies':<10} {'Donations':<10} {'Tag':<12}",
-            "-" * 80,
+            f"{'#':<4} {'Name':<18} {'Last Seen':<14} {'War Fame':<10} {'Role':<12} {'Trophies':<10} {'Donations':<10}",
+            "-" * 100,
         ]
+
+        self.members_text.insert(tk.END, "\n".join(header) + "\n")
 
         for i, member in enumerate(members, 1):
             role = member.get('role', 'member')
@@ -348,23 +471,46 @@ class ClashRoyaleApp:
                 'member': 'Member'
             }.get(role, role)
 
-            lines.append(
-                f"{i:<4} {member.get('name', 'N/A'):<20} {role_display:<12} "
-                f"{member.get('trophies', 0):<10,} {member.get('donations', 0):<10,} {member.get('tag', 'N/A'):<12}"
+            member_tag = member.get('tag', '')
+            member_name = member.get('name', 'N/A')
+            last_seen = self._parse_last_seen(member.get('lastSeen', ''))
+            war_fame = war_participants.get(member_tag, 0)
+            trophies = member.get('trophies', 0)
+            donations = member.get('donations', 0)
+
+            # Insert row number
+            self.members_text.insert(tk.END, f"{i:<4} ")
+
+            # Insert clickable name with unique tag
+            name_tag = f"member_{member_tag}"
+            self.members_text.tag_configure(name_tag, foreground="blue", underline=True)
+            self.members_text.tag_bind(name_tag, "<Button-1>", self._on_member_click)
+            self.members_text.tag_bind(name_tag, "<Enter>", lambda e: self.members_text.config(cursor="hand2"))
+            self.members_text.tag_bind(name_tag, "<Leave>", lambda e: self.members_text.config(cursor=""))
+
+            display_name = member_name[:16] if len(member_name) > 16 else member_name
+            self.members_text.insert(tk.END, f"{display_name:<18}", (name_tag,))
+
+            # Insert rest of the row
+            self.members_text.insert(
+                tk.END,
+                f" {last_seen:<14} {war_fame:<10,} {role_display:<12} {trophies:<10,} {donations:<10,}\n"
             )
 
         # Summary stats
         total_donations = sum(m.get('donations', 0) for m in members)
         avg_trophies = sum(m.get('trophies', 0) for m in members) // len(members) if members else 0
+        total_war_fame = sum(war_participants.get(m.get('tag', ''), 0) for m in members)
 
-        lines.extend([
+        summary = [
             "",
-            "-" * 80,
+            "-" * 100,
             f"Total Donations: {total_donations:,}",
             f"Average Trophies: {avg_trophies:,}",
-        ])
+            f"Total War Fame: {total_war_fame:,}",
+        ]
 
-        self.members_text.insert(tk.END, "\n".join(lines))
+        self.members_text.insert(tk.END, "\n".join(summary))
 
     def _display_player(self, player: Dict[str, Any]):
         """Display player statistics."""
@@ -448,16 +594,21 @@ class ClashRoyaleApp:
         self.player_text.insert(tk.END, "\n".join(lines))
 
     def _display_battles(self, battles: list):
-        """Display battle log."""
-        self.battles_text.delete(1.0, tk.END)
+        """Display battle log in the main battles tab."""
+        self._display_battles_in_widget(battles, self.battles_text)
+
+    def _display_battles_in_widget(self, battles: list, text_widget, player_name: str = None):
+        """Display battle log in a given text widget."""
+        text_widget.delete(1.0, tk.END)
 
         if not battles:
-            self.battles_text.insert(tk.END, "No recent battles found")
+            text_widget.insert(tk.END, "No recent battles found")
             return
 
+        title = f"  RECENT BATTLES" + (f" - {player_name}" if player_name else "")
         lines = [
             "=" * 80,
-            "  RECENT BATTLES",
+            title,
             "=" * 80,
             "",
         ]
@@ -491,7 +642,7 @@ class ClashRoyaleApp:
                 "",
             ])
 
-        self.battles_text.insert(tk.END, "\n".join(lines))
+        text_widget.insert(tk.END, "\n".join(lines))
 
     def run(self):
         """Run the application."""
