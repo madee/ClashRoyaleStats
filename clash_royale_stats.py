@@ -5,20 +5,73 @@ A macOS application to view clan and player statistics from the Clash Royale API
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, font as tkfont
 import urllib.request
 import urllib.parse
 import urllib.error
 import json
 import os
+import platform
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+from ctypes import cdll, c_void_p, c_bool, c_char_p, byref
+
+from PIL import Image, ImageTk
 
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.ticker
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+
+def load_custom_font(font_path: str) -> bool:
+    """Load a custom font file on macOS."""
+    if platform.system() != 'Darwin':
+        return False
+
+    try:
+        # Load Core Text framework
+        ct = cdll.LoadLibrary('/System/Library/Frameworks/CoreText.framework/CoreText')
+
+        # Create CFString for the font path
+        cf = cdll.LoadLibrary('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+        cf.CFStringCreateWithCString.restype = c_void_p
+        cf.CFStringCreateWithCString.argtypes = [c_void_p, c_char_p, c_void_p]
+
+        # Create CFURL from path
+        cf.CFURLCreateWithFileSystemPath.restype = c_void_p
+        cf.CFURLCreateWithFileSystemPath.argtypes = [c_void_p, c_void_p, c_void_p, c_bool]
+
+        path_str = cf.CFStringCreateWithCString(None, font_path.encode('utf-8'), 0x08000100)
+        url = cf.CFURLCreateWithFileSystemPath(None, path_str, 0, False)
+
+        # Register the font
+        ct.CTFontManagerRegisterFontsForURL.restype = c_bool
+        ct.CTFontManagerRegisterFontsForURL.argtypes = [c_void_p, c_void_p, c_void_p]
+
+        result = ct.CTFontManagerRegisterFontsForURL(url, 1, None)
+        return result
+    except Exception:
+        return False
+
+# Clash Royale Theme Colors
+THEME = {
+    'bg_dark': '#1E3A5F',        # Dark blue background
+    'bg_medium': '#2B5278',      # Medium blue
+    'bg_light': '#3B6B8C',       # Light blue
+    'gold': '#D4A84B',           # Gold accent
+    'gold_light': '#E8C252',     # Light gold
+    'gold_dark': '#B8860B',      # Dark gold
+    'text_light': '#FFFFFF',     # White text
+    'text_primary': '#E0E0E0',   # Light grey text (easier to read)
+    'text_secondary': '#B0B0B0', # Secondary text
+    'crown_blue': '#4A90D9',     # Shield blue
+    'success': '#28A745',        # Green for 1st place
+    'warning': '#FFC107',        # Yellow for 2nd place
+    'info': '#17A2B8',           # Cyan for 3rd place
+    'danger': '#DC3545',         # Red for 4th+ place
+}
 
 
 class ClashRoyaleAPI:
@@ -103,26 +156,188 @@ class ClashRoyaleApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Clash Royale Statistics")
-        self.root.geometry("1000x700")
-        self.root.minsize(900, 600)
+        self.root.geometry("1100x800")
+        self.root.minsize(1000, 700)
+        self.root.configure(bg=THEME['bg_dark'])
 
-        # Configure style
-        self.style = ttk.Style()
-        self.style.theme_use('aqua' if os.name == 'darwin' else 'clam')
+        # Get the directory where the script is located
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Load custom Clash Royale font
+        self.clash_font_loaded = False
+        self._load_clash_font()
+
+        # Configure themed style
+        self._setup_theme()
 
         self.api: Optional[ClashRoyaleAPI] = None
         config = self._load_config()
         self.api_key = config.get('api_key')
         self.last_clan_tag = config.get('last_clan_tag', '')
 
+        # Load logo
+        self.logo_image = None
+        self._load_logo()
+
         self._setup_ui()
 
         if self.api_key:
             self.api = ClashRoyaleAPI(self.api_key)
-            self.api_key_entry.insert(0, self.api_key)
 
         if self.last_clan_tag:
             self.clan_tag_entry.insert(0, self.last_clan_tag)
+
+    def _open_settings(self):
+        """Open the settings dialog."""
+        settings_window = tk.Toplevel(self.root)
+        settings_window.title("Settings")
+        settings_window.geometry("500x200")
+        settings_window.configure(bg=THEME['bg_dark'])
+        settings_window.transient(self.root)
+        settings_window.grab_set()
+
+        # Center the window
+        settings_window.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - 500) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 200) // 2
+        settings_window.geometry(f"+{x}+{y}")
+
+        # Settings content
+        content_frame = ttk.Frame(settings_window, padding="20")
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        # API Key section
+        ttk.Label(content_frame, text="API Configuration", style='Gold.TLabel').pack(anchor=tk.W, pady=(0, 10))
+
+        api_frame = ttk.Frame(content_frame)
+        api_frame.pack(fill=tk.X, pady=(0, 15))
+
+        ttk.Label(api_frame, text="API Key:").pack(side=tk.LEFT, padx=(0, 10))
+
+        self.settings_api_entry = tk.Entry(api_frame, width=40, show="*",
+                                           bg=THEME['bg_medium'], fg=THEME['text_light'],
+                                           insertbackground=THEME['text_light'],
+                                           relief=tk.FLAT, font=('Helvetica', 11))
+        self.settings_api_entry.pack(side=tk.LEFT, padx=(0, 10), ipady=5)
+
+        if self.api_key:
+            self.settings_api_entry.insert(0, self.api_key)
+
+        self.show_key_var = tk.BooleanVar()
+        ttk.Checkbutton(api_frame, text="Show", variable=self.show_key_var,
+                       command=lambda: self.settings_api_entry.config(
+                           show="" if self.show_key_var.get() else "*")).pack(side=tk.LEFT)
+
+        # Help text
+        help_text = ttk.Label(content_frame,
+                             text="Get your API key from developer.clashroyale.com",
+                             font=('Helvetica', 10, 'italic'), foreground=THEME['text_secondary'])
+        help_text.pack(anchor=tk.W, pady=(0, 20))
+
+        # Buttons
+        btn_frame = ttk.Frame(content_frame)
+        btn_frame.pack(fill=tk.X)
+
+        ttk.Button(btn_frame, text="Save", command=lambda: self._save_settings(settings_window)).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Button(btn_frame, text="Cancel", command=settings_window.destroy).pack(side=tk.RIGHT)
+
+    def _save_settings(self, window):
+        """Save settings from the dialog."""
+        api_key = self.settings_api_entry.get().strip()
+        if not api_key:
+            messagebox.showerror("Error", "Please enter an API key", parent=window)
+            return
+
+        self.api_key = api_key
+        self.api = ClashRoyaleAPI(api_key)
+        self._save_config(api_key=api_key)
+        self.api_status_var.set("API Key: Configured")
+        self.status_var.set("API key saved successfully")
+        window.destroy()
+        messagebox.showinfo("Success", "API key saved!")
+
+    def _load_clash_font(self):
+        """Load the custom Clash Royale font."""
+        try:
+            font_path = os.path.join(self.script_dir, 'assets', 'Clash_Regular.otf')
+            if os.path.exists(font_path):
+                self.clash_font_loaded = load_custom_font(font_path)
+        except Exception:
+            pass
+
+    def _load_logo(self):
+        """Load and resize the Clash Royale logo."""
+        try:
+            logo_path = os.path.join(self.script_dir, 'assets', 'Clash_Royale_Logo.png')
+            if os.path.exists(logo_path):
+                img = Image.open(logo_path)
+                # Resize to fit header (height ~60px)
+                ratio = 60 / img.height
+                new_size = (int(img.width * ratio), 60)
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                self.logo_image = ImageTk.PhotoImage(img)
+        except Exception:
+            pass
+
+    def _setup_theme(self):
+        """Configure the ttk theme with Clash Royale colors."""
+        self.style = ttk.Style()
+
+        # Create custom fonts
+        self.clash_font_name = 'Supercell-Magic' if self.clash_font_loaded else 'Helvetica'
+        self.clash_font = tkfont.Font(family=self.clash_font_name, size=11)
+        self.clash_font_large = tkfont.Font(family=self.clash_font_name, size=13)
+
+        # Configure colors for various widgets
+        self.style.configure('.',
+                            background=THEME['bg_dark'],
+                            foreground=THEME['text_primary'],
+                            fieldbackground=THEME['bg_medium'])
+
+        self.style.configure('TFrame', background=THEME['bg_dark'])
+        self.style.configure('TLabel', background=THEME['bg_dark'], foreground=THEME['text_primary'])
+        self.style.configure('TLabelframe', background=THEME['bg_dark'], foreground=THEME['gold'])
+        self.style.configure('TLabelframe.Label', background=THEME['bg_dark'], foreground=THEME['gold'],
+                            font=('Helvetica', 12, 'bold'))
+
+        self.style.configure('TButton',
+                            background=THEME['gold'],
+                            foreground=THEME['bg_dark'],
+                            font=('Helvetica', 11, 'bold'),
+                            padding=(10, 5))
+        self.style.map('TButton',
+                      background=[('active', THEME['gold_light']), ('pressed', THEME['gold_dark'])])
+
+        self.style.configure('TEntry',
+                            fieldbackground=THEME['bg_medium'],
+                            foreground=THEME['text_light'],
+                            insertcolor=THEME['text_light'])
+
+        self.style.configure('TCheckbutton',
+                            background=THEME['bg_dark'],
+                            foreground=THEME['text_primary'])
+
+        # Make tabs more prominent and always visible
+        self.style.configure('TNotebook', background=THEME['bg_dark'], borderwidth=0, tabmargins=[5, 5, 5, 0])
+        self.style.configure('TNotebook.Tab',
+                            background=THEME['bg_light'],
+                            foreground=THEME['text_light'],
+                            padding=(20, 10),
+                            font=('Helvetica', 12, 'bold'))
+        self.style.map('TNotebook.Tab',
+                      background=[('selected', THEME['gold']), ('!selected', THEME['bg_medium'])],
+                      foreground=[('selected', THEME['bg_dark']), ('!selected', THEME['text_primary'])],
+                      expand=[('selected', [1, 1, 1, 0])])
+
+        self.style.configure('Gold.TLabel',
+                            background=THEME['bg_dark'],
+                            foreground=THEME['gold'],
+                            font=('Helvetica', 14, 'bold'))
+
+        self.style.configure('Status.TLabel',
+                            background=THEME['bg_medium'],
+                            foreground=THEME['text_primary'],
+                            font=('Helvetica', 10))
 
     def _load_config(self) -> Dict[str, Any]:
         """Load config from file."""
@@ -147,24 +362,32 @@ class ClashRoyaleApp:
     def _setup_ui(self):
         """Set up the user interface."""
         # Main container
-        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame = ttk.Frame(self.root, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # API Key Section
-        api_frame = ttk.LabelFrame(main_frame, text="API Configuration", padding="10")
-        api_frame.pack(fill=tk.X, pady=(0, 10))
+        # Header with logo and settings button
+        header_frame = ttk.Frame(main_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 15))
 
-        ttk.Label(api_frame, text="API Key:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
-        self.api_key_entry = ttk.Entry(api_frame, width=60, show="*")
-        self.api_key_entry.grid(row=0, column=1, sticky=tk.EW, padx=(0, 10))
+        if self.logo_image:
+            logo_label = ttk.Label(header_frame, image=self.logo_image, background=THEME['bg_dark'])
+            logo_label.pack(side=tk.LEFT)
 
-        self.show_key_var = tk.BooleanVar()
-        ttk.Checkbutton(api_frame, text="Show", variable=self.show_key_var,
-                       command=self._toggle_key_visibility).grid(row=0, column=2, padx=(0, 10))
+        title_label = ttk.Label(header_frame, text="Statistics Tracker",
+                               style='Gold.TLabel')
+        title_label.pack(side=tk.LEFT, padx=(15, 0))
 
-        ttk.Button(api_frame, text="Save Key", command=self._save_key).grid(row=0, column=3)
+        # Settings button on the right
+        settings_btn = ttk.Button(header_frame, text="Settings", command=self._open_settings)
+        settings_btn.pack(side=tk.RIGHT, padx=(10, 0))
 
-        api_frame.columnconfigure(1, weight=1)
+        # API key status indicator
+        self.api_status_var = tk.StringVar(value="API Key: Not Set")
+        if self.api_key:
+            self.api_status_var.set("API Key: Configured")
+        api_status_label = ttk.Label(header_frame, textvariable=self.api_status_var,
+                                     font=('Helvetica', 10), foreground=THEME['text_secondary'])
+        api_status_label.pack(side=tk.RIGHT, padx=(10, 0))
 
         # Search Section
         search_frame = ttk.LabelFrame(main_frame, text="Search", padding="10")
@@ -172,95 +395,188 @@ class ClashRoyaleApp:
 
         # Clan search
         ttk.Label(search_frame, text="Clan Tag:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
-        self.clan_tag_entry = ttk.Entry(search_frame, width=20)
-        self.clan_tag_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 10))
+        self.clan_tag_entry = tk.Entry(search_frame, width=20,
+                                       bg=THEME['bg_medium'], fg=THEME['text_light'],
+                                       insertbackground=THEME['text_light'],
+                                       relief=tk.FLAT, font=('Helvetica', 11))
+        self.clan_tag_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 10), ipady=5)
         ttk.Button(search_frame, text="Get Clan Stats", command=self._fetch_clan).grid(row=0, column=2, padx=(0, 20))
 
         # Player search
         ttk.Label(search_frame, text="Player Tag:").grid(row=0, column=3, sticky=tk.W, padx=(0, 10))
-        self.player_tag_entry = ttk.Entry(search_frame, width=20)
-        self.player_tag_entry.grid(row=0, column=4, sticky=tk.W, padx=(0, 10))
+        self.player_tag_entry = tk.Entry(search_frame, width=20,
+                                         bg=THEME['bg_medium'], fg=THEME['text_light'],
+                                         insertbackground=THEME['text_light'],
+                                         relief=tk.FLAT, font=('Helvetica', 11))
+        self.player_tag_entry.grid(row=0, column=4, sticky=tk.W, padx=(0, 10), ipady=5)
         ttk.Button(search_frame, text="Get Player Stats", command=self._fetch_player).grid(row=0, column=5)
 
-        ttk.Label(search_frame, text="(Include # at start, e.g., #ABC123)",
-                 font=('TkDefaultFont', 10, 'italic')).grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+        hint_label = ttk.Label(search_frame, text="(Include # at start, e.g., #ABC123)",
+                              font=('Helvetica', 10, 'italic'))
+        hint_label.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
-        # Notebook for results
-        self.notebook = ttk.Notebook(main_frame)
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        # Tab container (holds tab bar + content)
+        tab_container = tk.Frame(main_frame, bg=THEME['bg_medium'])
+        tab_container.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        # Custom tab bar frame - spans full width with background
+        tab_bar_frame = tk.Frame(tab_container, bg=THEME['bg_medium'], height=45)
+        tab_bar_frame.pack(fill=tk.X, side=tk.TOP)
+        tab_bar_frame.pack_propagate(False)  # Keep fixed height
+
+        # Tab buttons
+        self.tab_buttons = []
+        self.tab_frames = []
+        tab_names = ["Clan Statistics", "Clan Members", "Player Statistics", "Battle Log"]
+
+        for i, name in enumerate(tab_names):
+            btn = tk.Button(tab_bar_frame, text=name,
+                           font=('Helvetica', 12, 'bold'),
+                           bg=THEME['bg_light'],
+                           fg=THEME['text_primary'],
+                           activebackground=THEME['gold'],
+                           activeforeground=THEME['bg_dark'],
+                           relief=tk.FLAT,
+                           bd=0,
+                           padx=20, pady=10,
+                           cursor='hand2',
+                           command=lambda idx=i: self._select_tab(idx))
+            btn.pack(side=tk.LEFT, padx=(0, 2), pady=(5, 0))
+            self.tab_buttons.append(btn)
+
+        # Content container - below the tab bar
+        self.content_frame = tk.Frame(tab_container, bg=THEME['bg_dark'])
+        self.content_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Text widget styling
+        text_config = {
+            'bg': THEME['bg_medium'],
+            'fg': THEME['text_primary'],
+            'font': ('Menlo', 11),
+            'relief': tk.FLAT,
+            'insertbackground': THEME['text_light'],
+            'selectbackground': THEME['gold'],
+            'selectforeground': THEME['bg_dark'],
+            'padx': 10,
+            'pady': 10
+        }
 
         # Clan Statistics tab (first)
-        self.clan_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.clan_frame, text="Clan Statistics")
+        self.clan_frame = tk.Frame(self.content_frame, bg=THEME['bg_dark'], padx=10, pady=10)
+        self.tab_frames.append(self.clan_frame)
 
         # Top: text stats
-        self.clan_text_frame = ttk.Frame(self.clan_frame)
+        self.clan_text_frame = tk.Frame(self.clan_frame, bg=THEME['bg_dark'])
         self.clan_text_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.clan_text = scrolledtext.ScrolledText(self.clan_text_frame, wrap=tk.WORD, font=('Menlo', 11), height=12)
+        self.clan_text = scrolledtext.ScrolledText(self.clan_text_frame, wrap=tk.WORD, height=12, **text_config)
         self.clan_text.pack(fill=tk.BOTH, expand=True)
 
         # Bottom: graph
-        self.clan_graph_frame = ttk.Frame(self.clan_frame)
+        self.clan_graph_frame = tk.Frame(self.clan_frame, bg=THEME['bg_dark'])
         self.clan_graph_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
         self.clan_canvas = None  # Will hold the matplotlib canvas
 
         # Clan Members tab (second)
-        self.members_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.members_frame, text="Clan Members")
+        self.members_frame = tk.Frame(self.content_frame, bg=THEME['bg_dark'], padx=10, pady=10)
+        self.tab_frames.append(self.members_frame)
 
-        self.members_text = tk.Text(self.members_frame, wrap=tk.WORD, font=('Menlo', 11))
-        members_scrollbar = ttk.Scrollbar(self.members_frame, orient=tk.VERTICAL, command=self.members_text.yview)
-        self.members_text.configure(yscrollcommand=members_scrollbar.set)
-        members_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.members_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Header label
+        self.members_header = tk.Label(self.members_frame, text="CLAN MEMBERS",
+                                       bg=THEME['bg_dark'], fg=THEME['gold'],
+                                       font=('Helvetica', 14, 'bold'))
+        self.members_header.pack(anchor=tk.W, pady=(0, 5))
 
-        # Configure tag for clickable names
-        self.members_text.tag_configure("clickable", foreground="blue", underline=True)
-        self.members_text.tag_bind("clickable", "<Button-1>", self._on_member_click)
-        self.members_text.tag_bind("clickable", "<Enter>", lambda e: self.members_text.config(cursor="hand2"))
-        self.members_text.tag_bind("clickable", "<Leave>", lambda e: self.members_text.config(cursor=""))
+        self.members_subheader = tk.Label(self.members_frame, text="Double-click a row to view player stats",
+                                          bg=THEME['bg_dark'], fg=THEME['text_secondary'],
+                                          font=('Helvetica', 10, 'italic'))
+        self.members_subheader.pack(anchor=tk.W, pady=(0, 10))
+
+        # Create Treeview with scrollbars
+        tree_frame = tk.Frame(self.members_frame, bg=THEME['bg_dark'])
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Style the Treeview
+        self.style.configure('Members.Treeview',
+                            background=THEME['bg_medium'],
+                            foreground=THEME['text_primary'],
+                            fieldbackground=THEME['bg_medium'],
+                            rowheight=25)
+        self.style.configure('Members.Treeview.Heading',
+                            background=THEME['bg_light'],
+                            foreground=THEME['gold'],
+                            font=('Helvetica', 10, 'bold'))
+        self.style.map('Members.Treeview',
+                      background=[('selected', THEME['gold'])],
+                      foreground=[('selected', THEME['bg_dark'])])
+
+        # Define columns
+        self.members_columns = ('#', 'Name', 'Current', 'Avg', 'War-1', 'War-2', 'War-3', 'War-4', 'War-5', 'War-6', 'Role', 'Trophies', 'Donats', 'Last Seen')
+        self.members_tree = ttk.Treeview(tree_frame, columns=self.members_columns, show='headings', style='Members.Treeview')
+
+        # Scrollbars
+        members_scrollbar_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.members_tree.yview)
+        members_scrollbar_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.members_tree.xview)
+        self.members_tree.configure(yscrollcommand=members_scrollbar_y.set, xscrollcommand=members_scrollbar_x.set)
+
+        members_scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
+        members_scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.members_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Bind click event for member names
+        self.members_tree.bind('<Double-1>', self._on_member_tree_click)
+        self.members_tree.bind('<Return>', self._on_member_tree_click)
+
+        # Summary label at bottom
+        self.members_summary = tk.Label(self.members_frame, text="",
+                                        bg=THEME['bg_dark'], fg=THEME['text_primary'],
+                                        font=('Menlo', 10), justify=tk.LEFT, anchor=tk.W)
+        self.members_summary.pack(fill=tk.X, pady=(10, 0))
 
         # Player Statistics tab (third)
-        self.player_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.player_frame, text="Player Statistics")
+        self.player_frame = tk.Frame(self.content_frame, bg=THEME['bg_dark'], padx=10, pady=10)
+        self.tab_frames.append(self.player_frame)
 
-        self.player_text = scrolledtext.ScrolledText(self.player_frame, wrap=tk.WORD, font=('Menlo', 11))
+        self.player_text = scrolledtext.ScrolledText(self.player_frame, wrap=tk.WORD, **text_config)
         self.player_text.pack(fill=tk.BOTH, expand=True)
 
         # Battle Log tab (fourth/last)
-        self.battles_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(self.battles_frame, text="Battle Log")
+        self.battles_frame = tk.Frame(self.content_frame, bg=THEME['bg_dark'], padx=10, pady=10)
+        self.tab_frames.append(self.battles_frame)
 
-        self.battles_text = scrolledtext.ScrolledText(self.battles_frame, wrap=tk.WORD, font=('Menlo', 11))
+        self.battles_text = scrolledtext.ScrolledText(self.battles_frame, wrap=tk.WORD, **text_config)
         self.battles_text.pack(fill=tk.BOTH, expand=True)
 
+        # Select first tab by default
+        self.current_tab = 0
+        self._select_tab(0)
+
         # Status bar
-        self.status_var = tk.StringVar(value="Ready")
-        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_var = tk.StringVar(value="Ready - Enter a clan or player tag to get started")
+        status_bar = ttk.Label(main_frame, textvariable=self.status_var, style='Status.TLabel',
+                              padding=(10, 5))
         status_bar.pack(fill=tk.X, pady=(10, 0))
 
         # Bind Enter key
         self.clan_tag_entry.bind('<Return>', lambda e: self._fetch_clan())
         self.player_tag_entry.bind('<Return>', lambda e: self._fetch_player())
 
-    def _toggle_key_visibility(self):
-        """Toggle API key visibility."""
-        self.api_key_entry.config(show="" if self.show_key_var.get() else "*")
-
-    def _save_key(self):
-        """Save the API key."""
-        api_key = self.api_key_entry.get().strip()
-        if not api_key:
-            messagebox.showerror("Error", "Please enter an API key")
-            return
-
-        self.api_key = api_key
-        self.api = ClashRoyaleAPI(api_key)
-        self._save_config(api_key=api_key)
-        self.status_var.set("API key saved successfully")
-        messagebox.showinfo("Success", "API key saved!")
+    def _select_tab(self, index: int):
+        """Switch to the selected tab."""
+        self.current_tab = index
+        # Update button styles
+        for i, btn in enumerate(self.tab_buttons):
+            if i == index:
+                btn.config(bg=THEME['gold'], fg=THEME['bg_dark'])
+            else:
+                btn.config(bg=THEME['bg_medium'], fg=THEME['text_primary'])
+        # Show/hide frames
+        for i, frame in enumerate(self.tab_frames):
+            if i == index:
+                frame.pack(fill=tk.BOTH, expand=True)
+            else:
+                frame.pack_forget()
 
     def _normalize_tag(self, tag: str) -> str:
         """Normalize a tag (ensure it starts with #)."""
@@ -368,7 +684,7 @@ class ClashRoyaleApp:
 
             self._display_members(members, war_participants, past_wars)
 
-            self.notebook.select(self.clan_frame)
+            self._select_tab(0)  # Clan Statistics tab
             self.status_var.set(f"Loaded clan: {clan.get('name', 'Unknown')}")
 
         except Exception as e:
@@ -403,30 +719,23 @@ class ClashRoyaleApp:
                 self.battles_text.delete(1.0, tk.END)
                 self.battles_text.insert(tk.END, "Battle log not available")
 
-            self.notebook.select(self.player_frame)
+            self._select_tab(2)  # Player Statistics tab
             self.status_var.set(f"Loaded player: {player.get('name', 'Unknown')}")
 
         except Exception as e:
             self.status_var.set("Error fetching player")
             messagebox.showerror("Error", str(e))
 
-    def _on_member_click(self, event):
-        """Handle click on member name to show their battle log."""
-        # Get the tag from the clicked position
-        index = self.members_text.index(f"@{event.x},{event.y}")
-
-        # Get all tags at this position
-        tags = self.members_text.tag_names(index)
-
-        # Find the member tag (starts with 'member_')
-        member_tag = None
-        for tag in tags:
-            if tag.startswith("member_"):
-                member_tag = tag[7:]  # Remove 'member_' prefix
-                break
-
-        if member_tag:
-            self._fetch_member_stats(member_tag)
+    def _on_member_tree_click(self, event):
+        """Handle double-click on member row in treeview."""
+        selection = self.members_tree.selection()
+        if selection:
+            item = selection[0]
+            # Get the player tag stored in the item's tags
+            tags = self.members_tree.item(item, 'tags')
+            if tags:
+                player_tag = tags[0]
+                self._fetch_member_stats(player_tag)
 
     def _fetch_member_stats(self, player_tag: str):
         """Fetch and display stats and battle log for a clan member."""
@@ -453,7 +762,7 @@ class ClashRoyaleApp:
                 self.battles_text.insert(tk.END, "Battle log not available")
 
             # Switch to Player Statistics tab
-            self.notebook.select(self.player_frame)
+            self._select_tab(2)  # Player Statistics tab
 
             self.status_var.set(f"Loaded stats for {player_name}")
 
@@ -542,27 +851,35 @@ class ClashRoyaleApp:
             totals.append(clan_total)
             positions.append(clan_position)
 
-        # Create figure
-        fig = Figure(figsize=(5, 4), dpi=100)
+        # Create figure with theme colors
+        fig = Figure(figsize=(6, 3.5), dpi=100, facecolor=THEME['bg_dark'])
         ax = fig.add_subplot(111)
+        ax.set_facecolor(THEME['bg_medium'])
 
-        # Plot line graph
+        # Plot line graph with gold color
         x = range(len(weeks))
-        ax.plot(x, totals, marker='o', linewidth=2, markersize=8, color='#1f77b4')
+        ax.plot(x, totals, marker='o', linewidth=2.5, markersize=10,
+                color=THEME['gold'], markerfacecolor=THEME['gold_light'],
+                markeredgecolor=THEME['gold_dark'], markeredgewidth=2)
 
         # Add position annotations
         for i, (xi, yi, pos) in enumerate(zip(x, totals, positions)):
             if pos > 0:
-                color = '#28a745' if pos == 1 else '#ffc107' if pos == 2 else '#dc3545' if pos >= 4 else '#17a2b8'
+                color = THEME['success'] if pos == 1 else THEME['warning'] if pos == 2 else THEME['danger'] if pos >= 4 else THEME['info']
                 ax.annotate(f'#{pos}', (xi, yi), textcoords="offset points",
-                           xytext=(0, 10), ha='center', fontsize=9, fontweight='bold', color=color)
+                           xytext=(0, 12), ha='center', fontsize=10, fontweight='bold', color=color)
 
-        ax.set_xlabel('Week (1 = Most Recent)')
-        ax.set_ylabel('Total Fame')
-        ax.set_title('River Race Performance')
+        ax.set_xlabel('Week (1 = Most Recent)', color=THEME['text_primary'], fontsize=10)
+        ax.set_ylabel('Total Fame', color=THEME['text_primary'], fontsize=10)
+        ax.set_title('River Race Performance', color=THEME['gold'], fontsize=12, fontweight='bold')
         ax.set_xticks(x)
-        ax.set_xticklabels(weeks, rotation=45)
-        ax.grid(True, alpha=0.3)
+        ax.set_xticklabels(weeks, rotation=45, color=THEME['text_primary'])
+        ax.tick_params(colors=THEME['text_primary'])
+        ax.grid(True, alpha=0.3, color=THEME['text_primary'])
+
+        # Style spines
+        for spine in ax.spines.values():
+            spine.set_color(THEME['bg_light'])
 
         # Format y-axis with commas
         ax.get_yaxis().set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
@@ -575,49 +892,42 @@ class ClashRoyaleApp:
         self.clan_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
     def _display_members(self, members_data: Dict[str, Any], war_participants: Dict[str, int], past_wars: List[Dict[str, int]] = None):
-        """Display clan members with clickable names."""
-        self.members_text.delete(1.0, tk.END)
-        self.members_text.config(state=tk.NORMAL)
+        """Display clan members in treeview table."""
+        # Clear existing items
+        for item in self.members_tree.get_children():
+            self.members_tree.delete(item)
 
         if past_wars is None:
             past_wars = []
 
         members = members_data.get('items', [])
 
-        # Build header with past war columns
-        past_war_headers = ""
-        for i in range(6):
-            past_war_headers += f"{'War-' + str(i+1):<8}"
+        if not members:
+            self.members_header.config(text="CLAN MEMBERS (0 total)")
+            self.members_summary.config(text="No members found")
+            return
 
-        # Header
-        header = [
-            "=" * 158,
-            f"  CLAN MEMBERS ({len(members)} total)",
-            "  Click on a player name to view their stats",
-            "=" * 158,
-            "",
-            f"{'#':<4} {'Name':<16} {'Current':<8} {'Avg':<8} {past_war_headers}{'Role':<10} {'Trophies':<9} {'Donats':<8} {'Last Seen':<12}",
-            "-" * 158,
-        ]
+        self.members_header.config(text=f"CLAN MEMBERS ({len(members)} total)")
 
-        self.members_text.insert(tk.END, "\n".join(header) + "\n")
-
-        # Pre-calculate averages for sorting
+        # Pre-calculate all data and averages first
         member_data = []
         for member in members:
             member_tag = member.get('tag', '')
             eligible_wars = []
-            for j in range(min(6, len(past_wars))):
-                if member_tag in past_wars[j]:
-                    eligible_wars.append(past_wars[j][member_tag])
+            past_war_fames = []
+            for j in range(6):
+                if j < len(past_wars):
+                    if member_tag in past_wars[j]:
+                        fame = past_wars[j][member_tag]
+                        past_war_fames.append(fame)
+                        eligible_wars.append(fame)
+                    else:
+                        past_war_fames.append(None)  # Not a member at that time
+                else:
+                    past_war_fames.append(None)
 
             avg_fame = sum(eligible_wars) // len(eligible_wars) if eligible_wars else -1
-            member_data.append((member, avg_fame))
 
-        # Sort by average war contribution (descending), -1 values go to bottom
-        member_data.sort(key=lambda x: x[1] if x[1] >= 0 else -1, reverse=True)
-
-        for i, (member, avg_fame) in enumerate(member_data, 1):
             role = member.get('role', 'member')
             role_display = {
                 'leader': 'Leader',
@@ -626,64 +936,93 @@ class ClashRoyaleApp:
                 'member': 'Member'
             }.get(role, role)
 
-            member_tag = member.get('tag', '')
-            member_name = member.get('name', 'N/A')
-            last_seen = self._parse_last_seen(member.get('lastSeen', ''))
-            war_fame = war_participants.get(member_tag, 0)
-            trophies = member.get('trophies', 0)
-            donations = member.get('donations', 0)
+            member_data.append({
+                'tag': member_tag,
+                'name': member.get('name', 'N/A'),
+                'role': role_display,
+                'trophies': member.get('trophies', 0),
+                'donations': member.get('donations', 0),
+                'last_seen': self._parse_last_seen(member.get('lastSeen', '')),
+                'war_fame': war_participants.get(member_tag, 0),
+                'avg_fame': avg_fame,
+                'past_war_fames': past_war_fames,
+            })
 
-            # Get past war contributions
-            past_war_values = ""
-            for j in range(6):
-                if j < len(past_wars):
-                    if member_tag in past_wars[j]:
-                        fame = past_wars[j][member_tag]
-                        past_war_values += f"{fame:<8,}"
-                    else:
-                        past_war_values += f"{'-':<8}"
+        # Sort by average war contribution (descending), -1 values go to bottom
+        member_data.sort(key=lambda x: x['avg_fame'] if x['avg_fame'] >= 0 else -1, reverse=True)
+
+        # Calculate dynamic column widths based on data (in pixels, approximate)
+        def calc_width(values, header, multiplier=8):
+            max_len = max(max(len(str(v)) for v in values), len(header))
+            return max_len * multiplier + 10
+
+        # Setup column headings and widths
+        col_configs = {
+            '#': {'width': 40, 'anchor': tk.CENTER},
+            'Name': {'width': calc_width([m['name'] for m in member_data], 'Name', 9), 'anchor': tk.W},
+            'Current': {'width': calc_width([f"{m['war_fame']:,}" for m in member_data], 'Current'), 'anchor': tk.E},
+            'Avg': {'width': calc_width([f"{m['avg_fame']:,}" if m['avg_fame'] >= 0 else '-' for m in member_data], 'Avg'), 'anchor': tk.E},
+            'Role': {'width': calc_width([m['role'] for m in member_data], 'Role'), 'anchor': tk.W},
+            'Trophies': {'width': calc_width([f"{m['trophies']:,}" for m in member_data], 'Trophies'), 'anchor': tk.E},
+            'Donats': {'width': calc_width([f"{m['donations']:,}" for m in member_data], 'Donats'), 'anchor': tk.E},
+            'Last Seen': {'width': calc_width([m['last_seen'] for m in member_data], 'Last Seen'), 'anchor': tk.W},
+        }
+
+        # Add war columns
+        for j in range(6):
+            war_values = []
+            for m in member_data:
+                if m['past_war_fames'][j] is not None:
+                    war_values.append(f"{m['past_war_fames'][j]:,}")
                 else:
-                    past_war_values += f"{'-':<8}"
+                    war_values.append('-')
+            col_configs[f'War-{j+1}'] = {'width': calc_width(war_values, f'War-{j+1}'), 'anchor': tk.E}
 
-            # Format average display
-            if avg_fame >= 0:
-                avg_display = f"{avg_fame:<8,}"
-            else:
-                avg_display = f"{'-':<8}"
+        # Configure columns
+        for col in self.members_columns:
+            config = col_configs.get(col, {'width': 80, 'anchor': tk.CENTER})
+            self.members_tree.heading(col, text=col, anchor=tk.CENTER)
+            self.members_tree.column(col, width=config['width'], anchor=config['anchor'], minwidth=40)
 
-            # Insert row number
-            self.members_text.insert(tk.END, f"{i:<4} ")
+        # Insert data rows
+        for i, data in enumerate(member_data, 1):
+            # Format values
+            current_val = f"{data['war_fame']:,}"
+            avg_val = f"{data['avg_fame']:,}" if data['avg_fame'] >= 0 else "-"
+            trophies_val = f"{data['trophies']:,}"
+            donations_val = f"{data['donations']:,}"
 
-            # Insert clickable name with unique tag
-            name_tag = f"member_{member_tag}"
-            self.members_text.tag_configure(name_tag, foreground="blue", underline=True)
-            self.members_text.tag_bind(name_tag, "<Button-1>", self._on_member_click)
-            self.members_text.tag_bind(name_tag, "<Enter>", lambda e: self.members_text.config(cursor="hand2"))
-            self.members_text.tag_bind(name_tag, "<Leave>", lambda e: self.members_text.config(cursor=""))
+            # Past war values
+            war_vals = []
+            for j in range(6):
+                if data['past_war_fames'][j] is not None:
+                    war_vals.append(f"{data['past_war_fames'][j]:,}")
+                else:
+                    war_vals.append("-")
 
-            display_name = member_name[:14] if len(member_name) > 14 else member_name
-            self.members_text.insert(tk.END, f"{display_name:<16}", (name_tag,))
-
-            # Insert rest of the row
-            self.members_text.insert(
-                tk.END,
-                f" {war_fame:<8,} {avg_display}{past_war_values}{role_display:<10} {trophies:<9,} {donations:<8,} {last_seen:<12}\n"
+            # Build row values tuple
+            row_values = (
+                i,
+                data['name'],
+                current_val,
+                avg_val,
+                war_vals[0], war_vals[1], war_vals[2], war_vals[3], war_vals[4], war_vals[5],
+                data['role'],
+                trophies_val,
+                donations_val,
+                data['last_seen']
             )
 
+            # Insert row with player tag stored in tags for click handling
+            self.members_tree.insert('', tk.END, values=row_values, tags=(data['tag'],))
+
         # Summary stats
-        total_donations = sum(m.get('donations', 0) for m in members)
-        avg_trophies = sum(m.get('trophies', 0) for m in members) // len(members) if members else 0
-        total_war_fame = sum(war_participants.get(m.get('tag', ''), 0) for m in members)
+        total_donations = sum(m['donations'] for m in member_data)
+        avg_trophies = sum(m['trophies'] for m in member_data) // len(member_data)
+        total_war_fame = sum(m['war_fame'] for m in member_data)
 
-        summary = [
-            "",
-            "-" * 158,
-            f"Total Donations: {total_donations:,}",
-            f"Average Trophies: {avg_trophies:,}",
-            f"Total Current War Fame: {total_war_fame:,}",
-        ]
-
-        self.members_text.insert(tk.END, "\n".join(summary))
+        summary_text = f"Total Donations: {total_donations:,}  |  Average Trophies: {avg_trophies:,}  |  Total Current War Fame: {total_war_fame:,}"
+        self.members_summary.config(text=summary_text)
 
     def _display_player(self, player: Dict[str, Any]):
         """Display player statistics."""
