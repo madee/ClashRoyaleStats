@@ -271,9 +271,9 @@ class ClashRoyaleApp:
             logo_path = os.path.join(self.script_dir, 'assets', 'Clash_Royale_Logo.png')
             if os.path.exists(logo_path):
                 img = Image.open(logo_path)
-                # Resize to fit header (height ~60px)
-                ratio = 60 / img.height
-                new_size = (int(img.width * ratio), 60)
+                # Resize to fit header (height ~90px for larger logo)
+                ratio = 90 / img.height
+                new_size = (int(img.width * ratio), 90)
                 img = img.resize(new_size, Image.Resampling.LANCZOS)
                 self.logo_image = ImageTk.PhotoImage(img)
         except Exception:
@@ -365,17 +365,13 @@ class ClashRoyaleApp:
         main_frame = ttk.Frame(self.root, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Header with logo and settings button
+        # Header with logo and settings button - compact layout
         header_frame = ttk.Frame(main_frame)
-        header_frame.pack(fill=tk.X, pady=(0, 15))
+        header_frame.pack(fill=tk.X, pady=(0, 5))
 
         if self.logo_image:
             logo_label = ttk.Label(header_frame, image=self.logo_image, background=THEME['bg_dark'])
             logo_label.pack(side=tk.LEFT)
-
-        title_label = ttk.Label(header_frame, text="Statistics Tracker",
-                               style='Gold.TLabel')
-        title_label.pack(side=tk.LEFT, padx=(15, 0))
 
         # Settings button on the right
         settings_btn = ttk.Button(header_frame, text="Settings", command=self._open_settings)
@@ -389,31 +385,34 @@ class ClashRoyaleApp:
                                      font=('Helvetica', 10), foreground=THEME['text_secondary'])
         api_status_label.pack(side=tk.RIGHT, padx=(10, 0))
 
-        # Search Section
-        search_frame = ttk.LabelFrame(main_frame, text="Search", padding="10")
-        search_frame.pack(fill=tk.X, pady=(0, 10))
+        # Search Section - compact single row
+        search_frame = tk.Frame(main_frame, bg=THEME['bg_dark'])
+        search_frame.pack(fill=tk.X, pady=(0, 5))
 
         # Clan search
-        ttk.Label(search_frame, text="Clan Tag:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
-        self.clan_tag_entry = tk.Entry(search_frame, width=20,
+        tk.Label(search_frame, text="Clan Tag:", bg=THEME['bg_dark'], fg=THEME['text_secondary'],
+                 font=('Helvetica', 11)).pack(side=tk.LEFT, padx=(0, 5))
+        self.clan_tag_entry = tk.Entry(search_frame, width=15,
                                        bg=THEME['bg_medium'], fg=THEME['text_light'],
                                        insertbackground=THEME['text_light'],
                                        relief=tk.FLAT, font=('Helvetica', 11))
-        self.clan_tag_entry.grid(row=0, column=1, sticky=tk.W, padx=(0, 10), ipady=5)
-        ttk.Button(search_frame, text="Get Clan Stats", command=self._fetch_clan).grid(row=0, column=2, padx=(0, 20))
+        self.clan_tag_entry.pack(side=tk.LEFT, padx=(0, 5), ipady=3)
+        ttk.Button(search_frame, text="Get Clan Stats", command=self._fetch_clan).pack(side=tk.LEFT, padx=(0, 20))
 
         # Player search
-        ttk.Label(search_frame, text="Player Tag:").grid(row=0, column=3, sticky=tk.W, padx=(0, 10))
-        self.player_tag_entry = tk.Entry(search_frame, width=20,
+        tk.Label(search_frame, text="Player Tag:", bg=THEME['bg_dark'], fg=THEME['text_secondary'],
+                 font=('Helvetica', 11)).pack(side=tk.LEFT, padx=(0, 5))
+        self.player_tag_entry = tk.Entry(search_frame, width=15,
                                          bg=THEME['bg_medium'], fg=THEME['text_light'],
                                          insertbackground=THEME['text_light'],
                                          relief=tk.FLAT, font=('Helvetica', 11))
-        self.player_tag_entry.grid(row=0, column=4, sticky=tk.W, padx=(0, 10), ipady=5)
-        ttk.Button(search_frame, text="Get Player Stats", command=self._fetch_player).grid(row=0, column=5)
+        self.player_tag_entry.pack(side=tk.LEFT, padx=(0, 5), ipady=3)
+        ttk.Button(search_frame, text="Get Player Stats", command=self._fetch_player).pack(side=tk.LEFT, padx=(0, 10))
 
-        hint_label = ttk.Label(search_frame, text="(Include # at start, e.g., #ABC123)",
-                              font=('Helvetica', 10, 'italic'))
-        hint_label.grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
+        # Hint inline
+        hint_label = ttk.Label(search_frame, text="(Include #)",
+                              font=('Helvetica', 9, 'italic'), foreground=THEME['text_secondary'])
+        hint_label.pack(side=tk.LEFT)
 
         # Tab container (holds tab bar + content)
         tab_container = tk.Frame(main_frame, bg=THEME['bg_medium'])
@@ -871,7 +870,7 @@ class ClashRoyaleApp:
 
         ax.set_xlabel('Week (1 = Most Recent)', color=THEME['text_primary'], fontsize=10)
         ax.set_ylabel('Total Fame', color=THEME['text_primary'], fontsize=10)
-        ax.set_title('River Race Performance', color=THEME['gold'], fontsize=12, fontweight='bold')
+        ax.set_title('River Race Performance', color=THEME['gold'], fontsize=12, fontweight='bold', pad=15)
         ax.set_xticks(x)
         ax.set_xticklabels(weeks, rotation=45, color=THEME['text_primary'])
         ax.tick_params(colors=THEME['text_primary'])
@@ -883,6 +882,9 @@ class ClashRoyaleApp:
 
         # Format y-axis with commas
         ax.get_yaxis().set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
+
+        # Add extra top margin for position labels
+        ax.set_ylim(top=ax.get_ylim()[1] * 1.15)
 
         fig.tight_layout()
 
