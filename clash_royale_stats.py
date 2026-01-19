@@ -948,10 +948,18 @@ class ClashRoyaleApp:
                 'war_fame': war_participants.get(member_tag, 0),
                 'avg_fame': avg_fame,
                 'past_war_fames': past_war_fames,
+                'weeks_completed': len(eligible_wars),
             })
 
-        # Sort by average war contribution (descending), -1 values go to bottom
-        member_data.sort(key=lambda x: x['avg_fame'] if x['avg_fame'] >= 0 else -1, reverse=True)
+        # Sort by average war contribution (descending)
+        # Members with 3+ weeks completed are sorted first, others go to the end
+        def sort_key(m):
+            has_enough_weeks = m['weeks_completed'] >= 3
+            avg = m['avg_fame'] if m['avg_fame'] >= 0 else -1
+            # Primary: has 3+ weeks (True=1, False=0), Secondary: avg descending
+            return (has_enough_weeks, avg)
+
+        member_data.sort(key=sort_key, reverse=True)
 
         # Calculate dynamic column widths based on data (in pixels, approximate)
         def calc_width(values, header, multiplier=8):
