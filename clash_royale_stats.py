@@ -14,6 +14,12 @@ import os
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.ticker
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
 
 class ClashRoyaleAPI:
     """Client for the Clash Royale API."""
@@ -62,6 +68,16 @@ class ClashRoyaleAPI:
         """Get current river race (clan war) info."""
         encoded_tag = urllib.parse.quote(clan_tag, safe='')
         return self._make_request(f"/clans/{encoded_tag}/currentriverrace")
+
+    def get_clan_river_race_log(self, clan_tag: str) -> Dict[str, Any]:
+        """Get past river race (clan war) history."""
+        encoded_tag = urllib.parse.quote(clan_tag, safe='')
+        return self._make_request(f"/clans/{encoded_tag}/riverracelog")
+
+    def get_clan_war_log(self, clan_tag: str) -> Dict[str, Any]:
+        """Get clan war log."""
+        encoded_tag = urllib.parse.quote(clan_tag, safe='')
+        return self._make_request(f"/clans/{encoded_tag}/warlog")
 
     def get_player(self, player_tag: str) -> Dict[str, Any]:
         """Get player information by tag."""
@@ -177,8 +193,18 @@ class ClashRoyaleApp:
         self.clan_frame = ttk.Frame(self.notebook, padding="10")
         self.notebook.add(self.clan_frame, text="Clan Statistics")
 
-        self.clan_text = scrolledtext.ScrolledText(self.clan_frame, wrap=tk.WORD, font=('Menlo', 11))
+        # Top: text stats
+        self.clan_text_frame = ttk.Frame(self.clan_frame)
+        self.clan_text_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.clan_text = scrolledtext.ScrolledText(self.clan_text_frame, wrap=tk.WORD, font=('Menlo', 11), height=12)
         self.clan_text.pack(fill=tk.BOTH, expand=True)
+
+        # Bottom: graph
+        self.clan_graph_frame = ttk.Frame(self.clan_frame)
+        self.clan_graph_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        self.clan_canvas = None  # Will hold the matplotlib canvas
 
         # Clan Members tab (second)
         self.members_frame = ttk.Frame(self.notebook, padding="10")
@@ -295,7 +321,16 @@ class ClashRoyaleApp:
         try:
             # Get clan info
             clan = self.api.get_clan(tag)
-            self._display_clan(clan)
+
+            # Get river race log for the graph
+            river_race_log = []
+            try:
+                log_data = self.api.get_clan_river_race_log(tag)
+                river_race_log = log_data.get('items', [])
+            except Exception:
+                pass
+
+            self._display_clan(clan, tag, river_race_log)
 
             # Get members
             members = self.api.get_clan_members(tag)
@@ -311,7 +346,27 @@ class ClashRoyaleApp:
             except Exception:
                 pass  # War data not available
 
-            self._display_members(members, war_participants)
+            # Get past war history (up to 6 past wars)
+            past_wars = []  # List of dicts mapping player_tag -> fame for each past war
+            try:
+                river_race_log = self.api.get_clan_river_race_log(tag)
+                items = river_race_log.get('items', [])[:6]  # Get up to 6 past wars
+                for war in items:
+                    war_data = {}
+                    # Find our clan's standings in this war
+                    standings = war.get('standings', [])
+                    for standing in standings:
+                        clan_info = standing.get('clan', {})
+                        if clan_info.get('tag') == tag:
+                            participants = clan_info.get('participants', [])
+                            for p in participants:
+                                war_data[p.get('tag')] = p.get('fame', 0)
+                            break
+                    past_wars.append(war_data)
+            except Exception:
+                pass  # Past war data not available
+
+            self._display_members(members, war_participants, past_wars)
 
             self.notebook.select(self.clan_frame)
             self.status_var.set(f"Loaded clan: {clan.get('name', 'Unknown')}")
@@ -406,15 +461,18 @@ class ClashRoyaleApp:
             self.status_var.set("Error fetching member stats")
             messagebox.showerror("Error", str(e))
 
-    def _display_clan(self, clan: Dict[str, Any]):
-        """Display clan statistics."""
+    def _display_clan(self, clan: Dict[str, Any], clan_tag: str = "", river_race_log: List[Dict] = None):
+        """Display clan statistics and river race performance graph."""
         self.clan_text.delete(1.0, tk.END)
 
+        if river_race_log is None:
+            river_race_log = []
+
         lines = [
-            "=" * 60,
+            "=" * 50,
             f"  CLAN: {clan.get('name', 'N/A')}",
             f"  Tag: {clan.get('tag', 'N/A')}",
-            "=" * 60,
+            "=" * 50,
             "",
             "OVERVIEW",
             "-" * 40,
@@ -442,27 +500,124 @@ class ClashRoyaleApp:
 
         self.clan_text.insert(tk.END, "\n".join(lines))
 
-    def _display_members(self, members_data: Dict[str, Any], war_participants: Dict[str, int]):
+        # Create river race performance graph
+        self._display_river_race_graph(clan_tag, river_race_log)
+
+    def _display_river_race_graph(self, clan_tag: str, river_race_log: List[Dict]):
+        """Display a line graph of river race performance."""
+        # Clear existing canvas and labels
+        for widget in self.clan_graph_frame.winfo_children():
+            widget.destroy()
+        self.clan_canvas = None
+
+        if not river_race_log:
+            # No data to display
+            label = ttk.Label(self.clan_graph_frame, text="No river race history available")
+            label.pack(expand=True)
+            return
+
+        # Extract data from river race log (most recent first, oldest last)
+        weeks = []
+        totals = []
+        positions = []
+
+        for i, race in enumerate(river_race_log[:10]):  # Last 10 races, most recent first
+            week_num = i + 1
+            weeks.append(f"W{week_num}")
+
+            # Find our clan in standings
+            standings = race.get('standings', [])
+            clan_total = 0
+            clan_position = 0
+
+            for standing in standings:
+                clan_info = standing.get('clan', {})
+                if clan_info.get('tag') == clan_tag:
+                    # Sum up all participant fame
+                    participants = clan_info.get('participants', [])
+                    clan_total = sum(p.get('fame', 0) for p in participants)
+                    clan_position = standing.get('rank', 0)
+                    break
+
+            totals.append(clan_total)
+            positions.append(clan_position)
+
+        # Create figure
+        fig = Figure(figsize=(5, 4), dpi=100)
+        ax = fig.add_subplot(111)
+
+        # Plot line graph
+        x = range(len(weeks))
+        ax.plot(x, totals, marker='o', linewidth=2, markersize=8, color='#1f77b4')
+
+        # Add position annotations
+        for i, (xi, yi, pos) in enumerate(zip(x, totals, positions)):
+            if pos > 0:
+                color = '#28a745' if pos == 1 else '#ffc107' if pos == 2 else '#dc3545' if pos >= 4 else '#17a2b8'
+                ax.annotate(f'#{pos}', (xi, yi), textcoords="offset points",
+                           xytext=(0, 10), ha='center', fontsize=9, fontweight='bold', color=color)
+
+        ax.set_xlabel('Week (1 = Most Recent)')
+        ax.set_ylabel('Total Fame')
+        ax.set_title('River Race Performance')
+        ax.set_xticks(x)
+        ax.set_xticklabels(weeks, rotation=45)
+        ax.grid(True, alpha=0.3)
+
+        # Format y-axis with commas
+        ax.get_yaxis().set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
+
+        fig.tight_layout()
+
+        # Embed in tkinter
+        self.clan_canvas = FigureCanvasTkAgg(fig, master=self.clan_graph_frame)
+        self.clan_canvas.draw()
+        self.clan_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _display_members(self, members_data: Dict[str, Any], war_participants: Dict[str, int], past_wars: List[Dict[str, int]] = None):
         """Display clan members with clickable names."""
         self.members_text.delete(1.0, tk.END)
         self.members_text.config(state=tk.NORMAL)
 
+        if past_wars is None:
+            past_wars = []
+
         members = members_data.get('items', [])
+
+        # Build header with past war columns
+        past_war_headers = ""
+        for i in range(6):
+            past_war_headers += f"{'War-' + str(i+1):<8}"
 
         # Header
         header = [
-            "=" * 100,
+            "=" * 158,
             f"  CLAN MEMBERS ({len(members)} total)",
-            "  Click on a player name to view their battle log",
-            "=" * 100,
+            "  Click on a player name to view their stats",
+            "=" * 158,
             "",
-            f"{'#':<4} {'Name':<18} {'Last Seen':<14} {'War Fame':<10} {'Role':<12} {'Trophies':<10} {'Donations':<10}",
-            "-" * 100,
+            f"{'#':<4} {'Name':<16} {'Current':<8} {'Avg':<8} {past_war_headers}{'Role':<10} {'Trophies':<9} {'Donats':<8} {'Last Seen':<12}",
+            "-" * 158,
         ]
 
         self.members_text.insert(tk.END, "\n".join(header) + "\n")
 
-        for i, member in enumerate(members, 1):
+        # Pre-calculate averages for sorting
+        member_data = []
+        for member in members:
+            member_tag = member.get('tag', '')
+            eligible_wars = []
+            for j in range(min(6, len(past_wars))):
+                if member_tag in past_wars[j]:
+                    eligible_wars.append(past_wars[j][member_tag])
+
+            avg_fame = sum(eligible_wars) // len(eligible_wars) if eligible_wars else -1
+            member_data.append((member, avg_fame))
+
+        # Sort by average war contribution (descending), -1 values go to bottom
+        member_data.sort(key=lambda x: x[1] if x[1] >= 0 else -1, reverse=True)
+
+        for i, (member, avg_fame) in enumerate(member_data, 1):
             role = member.get('role', 'member')
             role_display = {
                 'leader': 'Leader',
@@ -478,6 +633,24 @@ class ClashRoyaleApp:
             trophies = member.get('trophies', 0)
             donations = member.get('donations', 0)
 
+            # Get past war contributions
+            past_war_values = ""
+            for j in range(6):
+                if j < len(past_wars):
+                    if member_tag in past_wars[j]:
+                        fame = past_wars[j][member_tag]
+                        past_war_values += f"{fame:<8,}"
+                    else:
+                        past_war_values += f"{'-':<8}"
+                else:
+                    past_war_values += f"{'-':<8}"
+
+            # Format average display
+            if avg_fame >= 0:
+                avg_display = f"{avg_fame:<8,}"
+            else:
+                avg_display = f"{'-':<8}"
+
             # Insert row number
             self.members_text.insert(tk.END, f"{i:<4} ")
 
@@ -488,13 +661,13 @@ class ClashRoyaleApp:
             self.members_text.tag_bind(name_tag, "<Enter>", lambda e: self.members_text.config(cursor="hand2"))
             self.members_text.tag_bind(name_tag, "<Leave>", lambda e: self.members_text.config(cursor=""))
 
-            display_name = member_name[:16] if len(member_name) > 16 else member_name
-            self.members_text.insert(tk.END, f"{display_name:<18}", (name_tag,))
+            display_name = member_name[:14] if len(member_name) > 14 else member_name
+            self.members_text.insert(tk.END, f"{display_name:<16}", (name_tag,))
 
             # Insert rest of the row
             self.members_text.insert(
                 tk.END,
-                f" {last_seen:<14} {war_fame:<10,} {role_display:<12} {trophies:<10,} {donations:<10,}\n"
+                f" {war_fame:<8,} {avg_display}{past_war_values}{role_display:<10} {trophies:<9,} {donations:<8,} {last_seen:<12}\n"
             )
 
         # Summary stats
@@ -504,10 +677,10 @@ class ClashRoyaleApp:
 
         summary = [
             "",
-            "-" * 100,
+            "-" * 158,
             f"Total Donations: {total_donations:,}",
             f"Average Trophies: {avg_trophies:,}",
-            f"Total War Fame: {total_war_fame:,}",
+            f"Total Current War Fame: {total_war_fame:,}",
         ]
 
         self.members_text.insert(tk.END, "\n".join(summary))
