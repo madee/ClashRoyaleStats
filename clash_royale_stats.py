@@ -12,7 +12,8 @@ import urllib.error
 import json
 import os
 import platform
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from ctypes import cdll, c_void_p, c_bool, c_char_p, byref
 
@@ -72,6 +73,209 @@ THEME = {
     'info': '#17A2B8',           # Cyan for 3rd place
     'danger': '#DC3545',         # Red for 4th+ place
 }
+
+
+class WarDatabase:
+    """SQLite database to persist war contribution data."""
+
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_path = os.path.expanduser("~/.clash_royale_wars.db")
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self):
+        """Initialize the database schema."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Members table - track names even after they leave
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS members (
+                    tag TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    clan_tag TEXT,
+                    last_updated TEXT
+                )
+            ''')
+            # War contributions table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS war_contributions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    member_tag TEXT NOT NULL,
+                    clan_tag TEXT NOT NULL,
+                    war_start_date TEXT NOT NULL,
+                    war_end_date TEXT NOT NULL,
+                    fame INTEGER NOT NULL,
+                    UNIQUE(member_tag, clan_tag, war_start_date)
+                )
+            ''')
+            # Clan update tracking table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS clan_updates (
+                    clan_tag TEXT PRIMARY KEY,
+                    last_update TEXT NOT NULL,
+                    last_war_end TEXT
+                )
+            ''')
+            conn.commit()
+
+    def get_most_recent_war_end(self) -> datetime:
+        """Calculate the most recent war end date (Sunday before the most recent Monday 10am).
+        Wars complete on Monday after 10am, but the war itself ends Sunday.
+        """
+        now = datetime.now()
+        # Find the most recent Monday 10am
+        days_since_monday = now.weekday()  # Monday = 0
+        if days_since_monday == 0 and now.hour < 10:
+            # It's Monday before 10am, so last war completed previous Monday
+            days_since_monday = 7
+
+        last_monday_10am = now.replace(hour=10, minute=0, second=0, microsecond=0) - timedelta(days=days_since_monday)
+
+        # The war that completed on this Monday ended on Sunday (1 day before)
+        war_end_sunday = last_monday_10am - timedelta(days=1)
+        return war_end_sunday.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def needs_update(self, clan_tag: str) -> bool:
+        """Check if the database needs to be updated for a clan.
+        Returns True if a new war has completed since last update.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT last_update, last_war_end FROM clan_updates WHERE clan_tag = ?', (clan_tag,))
+            row = cursor.fetchone()
+
+            if not row:
+                return True  # Never updated
+
+            last_update = datetime.fromisoformat(row[0])
+            most_recent_war_end = self.get_most_recent_war_end()
+
+            # Check if we've updated since the most recent war completed (Monday 10am after war end)
+            war_complete_time = most_recent_war_end + timedelta(days=1, hours=10)
+
+            return last_update < war_complete_time
+
+    def mark_updated(self, clan_tag: str):
+        """Mark a clan as updated."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            war_end = self.get_most_recent_war_end().strftime("%Y-%m-%d")
+            cursor.execute('''
+                INSERT INTO clan_updates (clan_tag, last_update, last_war_end)
+                VALUES (?, ?, ?)
+                ON CONFLICT(clan_tag) DO UPDATE SET
+                    last_update = excluded.last_update,
+                    last_war_end = excluded.last_war_end
+            ''', (clan_tag, now, war_end))
+            conn.commit()
+
+    def get_war_dates(self, weeks_ago: int, reference_end_date: datetime = None) -> tuple:
+        """Calculate war start and end dates for a given number of weeks ago.
+        Wars run Thursday to Sunday (4 days).
+        """
+        # Use most recent war end if not specified
+        if reference_end_date is None:
+            reference_end_date = self.get_most_recent_war_end()
+        elif isinstance(reference_end_date, str):
+            reference_end_date = datetime.strptime(reference_end_date, "%Y-%m-%d")
+
+        # Calculate the end date for the requested week
+        end_date = reference_end_date - timedelta(weeks=weeks_ago)
+        # Start date is Thursday (3 days before Sunday)
+        start_date = end_date - timedelta(days=3)
+        return (start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+
+    def save_member(self, tag: str, name: str, clan_tag: str):
+        """Save or update a member."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO members (tag, name, clan_tag, last_updated)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(tag) DO UPDATE SET
+                    name = excluded.name,
+                    clan_tag = excluded.clan_tag,
+                    last_updated = excluded.last_updated
+            ''', (tag, name, clan_tag, datetime.now().isoformat()))
+            conn.commit()
+
+    def save_war_contribution(self, member_tag: str, clan_tag: str, war_start: str, war_end: str, fame: int):
+        """Save a war contribution record."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO war_contributions (member_tag, clan_tag, war_start_date, war_end_date, fame)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(member_tag, clan_tag, war_start_date) DO UPDATE SET
+                    fame = excluded.fame,
+                    war_end_date = excluded.war_end_date
+            ''', (member_tag, clan_tag, war_start, war_end, fame))
+            conn.commit()
+
+    def get_member_wars(self, member_tag: str, clan_tag: str) -> List[Dict]:
+        """Get all war contributions for a member."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT war_start_date, war_end_date, fame
+                FROM war_contributions
+                WHERE member_tag = ? AND clan_tag = ?
+                ORDER BY war_start_date DESC
+            ''', (member_tag, clan_tag))
+            return [{'start': row[0], 'end': row[1], 'fame': row[2]} for row in cursor.fetchall()]
+
+    def get_all_members_for_clan(self, clan_tag: str) -> List[Dict]:
+        """Get all members who have war data for a clan (including former members)."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT DISTINCT m.tag, m.name
+                FROM members m
+                JOIN war_contributions wc ON m.tag = wc.member_tag
+                WHERE wc.clan_tag = ?
+            ''', (clan_tag,))
+            return [{'tag': row[0], 'name': row[1]} for row in cursor.fetchall()]
+
+    def get_war_contributions_by_date(self, clan_tag: str, war_start: str) -> Dict[str, int]:
+        """Get all contributions for a specific war."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT member_tag, fame
+                FROM war_contributions
+                WHERE clan_tag = ? AND war_start_date = ?
+            ''', (clan_tag, war_start))
+            return {row[0]: row[1] for row in cursor.fetchall()}
+
+    def populate_from_api_data(self, clan_tag: str, river_race_log: List[Dict]):
+        """Populate the database from API river race log data."""
+        # Use dynamically calculated most recent war end date
+        reference_end_date = self.get_most_recent_war_end()
+
+        for i, race in enumerate(river_race_log):
+            war_start, war_end = self.get_war_dates(i, reference_end_date)
+
+            # Find our clan in standings
+            standings = race.get('standings', [])
+            for standing in standings:
+                clan_info = standing.get('clan', {})
+                if clan_info.get('tag') == clan_tag:
+                    participants = clan_info.get('participants', [])
+                    for p in participants:
+                        member_tag = p.get('tag', '')
+                        member_name = p.get('name', 'Unknown')
+                        fame = p.get('fame', 0)
+
+                        # Save member info
+                        self.save_member(member_tag, member_name, clan_tag)
+                        # Save war contribution
+                        self.save_war_contribution(member_tag, clan_tag, war_start, war_end, fame)
+                    break
+
+        # Mark clan as updated
+        self.mark_updated(clan_tag)
 
 
 class ClashRoyaleAPI:
@@ -174,6 +378,9 @@ class ClashRoyaleApp:
         config = self._load_config()
         self.api_key = config.get('api_key')
         self.last_clan_tag = config.get('last_clan_tag', '')
+
+        # Initialize war database
+        self.war_db = WarDatabase()
 
         # Load logo
         self.logo_image = None
@@ -664,9 +871,17 @@ class ClashRoyaleApp:
             # Get past war history (up to 6 past wars)
             past_wars = []  # List of dicts mapping player_tag -> fame for each past war
             try:
-                river_race_log = self.api.get_clan_river_race_log(tag)
-                items = river_race_log.get('items', [])[:6]  # Get up to 6 past wars
-                for war in items:
+                river_race_log_data = self.api.get_clan_river_race_log(tag)
+                items = river_race_log_data.get('items', [])
+
+                # Check if database needs update (new war completed since last update)
+                if self.war_db.needs_update(tag):
+                    self.status_var.set(f"Updating war database for {tag}...")
+                    self.root.update()
+                    self.war_db.populate_from_api_data(tag, items)
+
+                # Get up to 6 past wars for display
+                for war in items[:6]:
                     war_data = {}
                     # Find our clan's standings in this war
                     standings = war.get('standings', [])
@@ -681,7 +896,7 @@ class ClashRoyaleApp:
             except Exception:
                 pass  # Past war data not available
 
-            self._display_members(members, war_participants, past_wars)
+            self._display_members(members, war_participants, past_wars, tag)
 
             self._select_tab(0)  # Clan Statistics tab
             self.status_var.set(f"Loaded clan: {clan.get('name', 'Unknown')}")
@@ -893,7 +1108,7 @@ class ClashRoyaleApp:
         self.clan_canvas.draw()
         self.clan_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    def _display_members(self, members_data: Dict[str, Any], war_participants: Dict[str, int], past_wars: List[Dict[str, int]] = None):
+    def _display_members(self, members_data: Dict[str, Any], war_participants: Dict[str, int], past_wars: List[Dict[str, int]] = None, clan_tag: str = None):
         """Display clan members in treeview table."""
         # Clear existing items
         for item in self.members_tree.get_children():
@@ -910,6 +1125,11 @@ class ClashRoyaleApp:
             return
 
         self.members_header.config(text=f"CLAN MEMBERS ({len(members)} total)")
+
+        # Save current members to database
+        if clan_tag:
+            for member in members:
+                self.war_db.save_member(member.get('tag', ''), member.get('name', 'Unknown'), clan_tag)
 
         # Pre-calculate all data and averages first
         member_data = []
